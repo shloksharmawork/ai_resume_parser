@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import zipfile
 from io import BytesIO
 from typing import Any, Optional, Union
@@ -8,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from docx import Document
 from groq import Groq
+from groq import RateLimitError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pypdf import PdfReader
 
@@ -183,16 +185,27 @@ def extract_files_from_zip(zip_upload) -> list[tuple[str, bytes]]:
 # Groq helpers
 # ---------------------------------------------------------------------------
 def ask_json(client: Groq, model: str, system: str, prompt: str) -> dict:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-    return json.loads(response.choices[0].message.content or "{}")
+    """Call Groq with automatic retry on rate-limit (429) errors."""
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            return json.loads(response.choices[0].message.content or "{}")
+        except RateLimitError as e:
+            if attempt == max_retries - 1:
+                raise
+            # Parse retry-after from error message if available, else use backoff
+            wait = 2 ** (attempt + 1)   # 2s, 4s, 8s, 16s, 32s
+            st.toast(f"⏳ Rate limit hit — retrying in {wait}s… (attempt {attempt+1}/{max_retries})", icon="⚠️")
+            time.sleep(wait)
 
 
 def parse_resume(client: Groq, model: str, text: str) -> Resume:
@@ -261,6 +274,13 @@ with st.sidebar:
         "Files are processed in memory. Resume text is sent to Groq for parsing. "
         "Avoid uploading documents without permission."
     )
+    with st.expander("💡 Rate limit tips"):
+        st.markdown(
+            "- Free tier: **8 000 TPM** — processing slows for large batches\n"
+            "- Upgrade at [console.groq.com/settings/billing](https://console.groq.com/settings/billing) "
+            "for higher limits\n"
+            "- Or use a faster model: `llama-3.1-8b-instant` has much higher free limits"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +386,9 @@ if run:
         except Exception as exc:
             st.error(f"❌ {filename}: {exc}")
         progress.progress((idx + 1) / total, text=f"Processed {idx + 1} / {total}")
+        # Small courtesy delay to avoid bursting the TPM rate limit
+        if idx < total - 1:
+            time.sleep(1.5)
 
     status_box.empty()
     progress.empty()
