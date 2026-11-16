@@ -1,5 +1,5 @@
 streamlit>=1.39,<2
-groq>=0.11,<1
+Groq>=0.11,<1
 pydantic>=2.7,<3
 pypdf>=5,<7
 python-docx>=1.1,<2
